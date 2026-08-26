@@ -1,691 +1,496 @@
 # -*- coding: utf-8 -*-
-"""PySide6 Fluent 风格 GUI"""
+"""文件粉碎工具 GUI - 增强版（智能模式+强力模式+详细日志）"""
 
 import os
 import sys
 import json
 import time
-import ctypes
 import subprocess
-from pathlib import Path
+import tempfile
 
-from PySide6.QtCore import Qt, QTimer, QThread, Signal
-from PySide6.QtGui import QFont, QIcon, QDragEnterEvent, QDropEvent
+from PySide6.QtCore import Qt, QThread, Signal, QTimer
+from PySide6.QtGui import QDragEnterEvent, QDropEvent, QFont, QColor, QIcon, QPixmap, QPainter, QBrush, QPen
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QListWidget, QListWidgetItem, QCheckBox,
-    QProgressBar, QTextEdit, QFileDialog, QMessageBox, QFrame,
-    QAbstractItemView, QSizePolicy
+    QLabel, QPushButton, QTextEdit, QFileDialog, QCheckBox,
+    QProgressBar, QFrame, QScrollArea, QMessageBox, QSizePolicy,
+    QGraphicsDropShadowEffect, QMenu
 )
 
-import winapi
-import engine
 import worker
-
-# Fluent 配色
-COLOR_BG = "#FFFFFF"
-COLOR_CARD = "#FFFFFF"
-COLOR_ACCENT = "#0078D4"
-COLOR_ACCENT_HOVER = "#106EBE"
-COLOR_ACCENT_PRESSED = "#005A9E"
-COLOR_TEXT = "#1F1F1F"
-COLOR_TEXT_SECONDARY = "#616161"
-COLOR_BORDER = "#E5E5E5"
-COLOR_DANGER = "#D13438"
-COLOR_SUCCESS = "#107C10"
-COLOR_WARN = "#FF8C00"
-COLOR_HOVER = "#F5F5F5"
+import winapi
 
 
-def is_frozen():
-    return getattr(sys, 'frozen', False)
+ACCENT = "#0078D4"
+ACCENT_HOVER = "#106EBE"
+BG = "#F3F3F3"
+CARD = "#FFFFFF"
+TEXT = "#1A1A1A"
+TEXT_SECOND = "#616161"
+BORDER = "#E1E1E1"
+SUCCESS = "#107C10"
+WARN = "#CA5010"
+ERROR = "#D13438"
+INFO = "#0078D4"
 
 
-def get_app_dir():
-    if is_frozen():
-        return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__))
+def make_icon(color, symbol, size=48):
+    pix = QPixmap(size, size)
+    pix.fill(Qt.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setBrush(QBrush(QColor(color)))
+    p.setPen(Qt.NoPen)
+    p.drawEllipse(4, 4, size-8, size-8)
+    p.setPen(QPen(QColor("#FFFFFF"), 3))
+    p.setFont(QFont("Segoe UI", 18, QFont.Bold))
+    p.drawText(pix.rect(), Qt.AlignCenter, symbol)
+    p.end()
+    return QIcon(pix)
 
 
-class DropListWidget(QListWidget):
-    """支持拖放的列表控件"""
-    paths_dropped = Signal(list)
+class DropArea(QFrame):
+    files_dropped = Signal(list)
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
+    def __init__(self):
+        super().__init__()
         self.setAcceptDrops(True)
-        self.setDragDropMode(QAbstractItemView.DropOnly)
-        self.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.setMinimumHeight(140)
+        self.setStyleSheet(f"""
+            DropArea {{
+                background: {CARD};
+                border: 2px dashed {BORDER};
+                border-radius: 12px;
+            }}
+            DropArea:hover {{ border-color: {ACCENT}; }}
+        """)
+        layout = QVBoxLayout(self)
+        layout.setAlignment(Qt.AlignCenter)
+        self.icon_label = QLabel("📁")
+        self.icon_label.setAlignment(Qt.AlignCenter)
+        self.icon_label.setStyleSheet("font-size: 42px;")
+        self.text_label = QLabel("将文件或文件夹拖到这里\n或点击选择")
+        self.text_label.setAlignment(Qt.AlignCenter)
+        self.text_label.setStyleSheet(f"color: {TEXT_SECOND}; font-size: 14px;")
+        layout.addWidget(self.icon_label)
+        layout.addWidget(self.text_label)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            paths, _ = QFileDialog.getOpenFileNames(self, "选择文件", "", "所有文件 (*.*)")
+            if paths: self.files_dropped.emit(paths)
 
     def dragEnterEvent(self, event: QDragEnterEvent):
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
-        else:
-            event.ignore()
+            self.setStyleSheet(f"background: {CARD}; border: 2px solid {ACCENT}; border-radius: 12px;")
 
-    def dragMoveEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-        else:
-            event.ignore()
+    def dragLeaveEvent(self, event):
+        self.setStyleSheet(f"background: {CARD}; border: 2px dashed {BORDER}; border-radius: 12px;")
 
     def dropEvent(self, event: QDropEvent):
-        paths = []
-        for url in event.mimeData().urls():
-            p = url.toLocalFile()
-            if p and os.path.exists(p):
-                paths.append(os.path.normpath(p))
-        if paths:
-            self.paths_dropped.emit(paths)
-        event.acceptProposedAction()
+        paths = [url.toLocalFile() for url in event.mimeData().urls() if url.toLocalFile()]
+        if paths: self.files_dropped.emit(paths)
+        self.setStyleSheet(f"background: {CARD}; border: 2px dashed {BORDER}; border-radius: 12px;")
 
 
-class FluentButton(QPushButton):
-    """Fluent 风格按钮"""
-    def __init__(self, text, primary=False, parent=None):
-        super().__init__(text, parent)
-        self.primary = primary
-        self.setMinimumHeight(34)
-        self.setCursor(Qt.PointingHandCursor)
-        if primary:
-            self.setStyleSheet(f"""
-                QPushButton {{
-                    background-color: {COLOR_ACCENT};
-                    color: white;
-                    border: none;
-                    border-radius: 4px;
-                    padding: 6px 20px;
-                    font-size: 13px;
-                    font-weight: 500;
-                }}
-                QPushButton:hover {{ background-color: {COLOR_ACCENT_HOVER}; }}
-                QPushButton:pressed {{ background-color: {COLOR_ACCENT_PRESSED}; }}
-                QPushButton:disabled {{ background-color: #B0B0B0; color: #E0E0E0; }}
-            """)
-        else:
-            self.setStyleSheet(f"""
-                QPushButton {{
-                    background-color: {COLOR_CARD};
-                    color: {COLOR_TEXT};
-                    border: 1px solid {COLOR_BORDER};
-                    border-radius: 4px;
-                    padding: 6px 16px;
-                    font-size: 13px;
-                }}
-                QPushButton:hover {{ background-color: {COLOR_HOVER}; border-color: #C0C0C0; }}
-                QPushButton:pressed {{ background-color: #EBEBEB; }}
-                QPushButton:disabled {{ color: #B0B0B0; }}
-            """)
+class FileItem(QFrame):
+    removed = Signal(str)
+
+    def __init__(self, path):
+        super().__init__()
+        self.path = path
+        self.setStyleSheet(f"background: {CARD}; border: 1px solid {BORDER}; border-radius: 8px;")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 8, 8, 8)
+        icon = "📁" if os.path.isdir(path) else "📄"
+        self.icon_label = QLabel(icon)
+        self.icon_label.setStyleSheet("font-size: 20px;")
+        self.name_label = QLabel(os.path.basename(path) or path)
+        self.name_label.setStyleSheet(f"color: {TEXT}; font-size: 13px; font-weight: 500;")
+        self.path_label = QLabel(path)
+        self.path_label.setStyleSheet(f"color: {TEXT_SECOND}; font-size: 11px;")
+        text_layout = QVBoxLayout()
+        text_layout.addWidget(self.name_label)
+        text_layout.addWidget(self.path_label)
+        self.status_label = QLabel("")
+        self.status_label.setStyleSheet("font-size: 12px; font-weight: 600;")
+        self.remove_btn = QPushButton("✕")
+        self.remove_btn.setFixedSize(28, 28)
+        self.remove_btn.setStyleSheet(f"QPushButton {{ background: transparent; border: none; color: {TEXT_SECOND}; font-size: 14px; border-radius: 14px; }} QPushButton:hover {{ background: {BORDER}; color: {TEXT}; }}")
+        self.remove_btn.clicked.connect(lambda: self.removed.emit(self.path))
+        layout.addWidget(self.icon_label)
+        layout.addLayout(text_layout, 1)
+        layout.addWidget(self.status_label)
+        layout.addWidget(self.remove_btn)
+
+    def set_status(self, status, message=""):
+        colors = {"deleted": SUCCESS, "reboot": WARN, "failed": ERROR, "blocked": ERROR, "pending": TEXT_SECOND}
+        icons = {"deleted": "✓", "reboot": "⏳", "failed": "✗", "blocked": "🚫", "pending": ""}
+        color = colors.get(status, TEXT_SECOND)
+        icon = icons.get(status, "")
+        self.status_label.setStyleSheet(f"color: {color}; font-size: 12px; font-weight: 600;")
+        self.status_label.setText(f"{icon} {message}" if message else icon)
 
 
-class FluentCheckBox(QCheckBox):
-    """Fluent 风格复选框"""
-    def __init__(self, text, parent=None):
-        super().__init__(text, parent)
-        self.setCursor(Qt.PointingHandCursor)
-        self.setStyleSheet(f"""
-            QCheckBox {{
-                spacing: 8px;
-                font-size: 13px;
-                color: {COLOR_TEXT};
-                padding: 4px 0;
-            }}
-            QCheckBox::indicator {{
-                width: 18px;
-                height: 18px;
-                border: 1px solid #A0A0A0;
-                border-radius: 3px;
-                background: white;
-            }}
-            QCheckBox::indicator:hover {{
-                border-color: {COLOR_ACCENT};
-            }}
-            QCheckBox::indicator:checked {{
-                background-color: {COLOR_ACCENT};
-                border-color: {COLOR_ACCENT};
-                image: none;
-            }}
-        """)
+class DeleteWorker(QThread):
+    log_signal = Signal(str, str)
+    result_signal = Signal(dict)
+    progress_signal = Signal(int, int)
+    proc_signal = Signal(dict)
+    finished_signal = Signal(dict)
 
+    def __init__(self, targets, options):
+        super().__init__()
+        self.targets = targets
+        self.options = options
+        self._cancel = False
 
-class CardFrame(QFrame):
-    """卡片容器"""
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setStyleSheet(f"""
-            CardFrame {{
-                background-color: {COLOR_CARD};
-                border: 1px solid {COLOR_BORDER};
-                border-radius: 6px;
-            }}
-        """)
+    def cancel(self):
+        self._cancel = True
+
+    def run(self):
+        try:
+            task_file, out_path = worker.write_task(self.targets, self.options)
+        except Exception as e:
+            self.log_signal.emit(f"创建任务失败: {e}", "error")
+            self.finished_signal.emit({"ok": False, "deleted": 0, "failed": len(self.targets), "reboot": 0, "blocked": 0})
+            return
+
+        exe = sys.executable
+        if getattr(sys, 'frozen', False):
+            exe = sys.executable
+        try:
+            proc = subprocess.Popen([exe, "--worker", task_file],
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    creationflags=0x08000000)
+        except Exception as e:
+            self.log_signal.emit(f"启动工作进程失败: {e}", "error")
+            self.finished_signal.emit({"ok": False, "deleted": 0, "failed": len(self.targets), "reboot": 0, "blocked": 0})
+            return
+
+        last_size = 0
+        while proc.poll() is None:
+            if self._cancel:
+                try:
+                    with open(task_file + ".cancel", "w") as f: f.write("1")
+                except: pass
+            try:
+                if os.path.exists(out_path):
+                    size = os.path.getsize(out_path)
+                    if size > last_size:
+                        with open(out_path, "r", encoding="utf-8") as f:
+                            f.seek(last_size)
+                            for line in f:
+                                line = line.strip()
+                                if not line: continue
+                                try:
+                                    evt = json.loads(line)
+                                    if evt.get("t") == "log":
+                                        self.log_signal.emit(evt.get("m",""), evt.get("l","info"))
+                                    elif evt.get("t") == "res":
+                                        self.result_signal.emit(evt)
+                                    elif evt.get("t") == "prog":
+                                        self.progress_signal.emit(evt.get("d",0), evt.get("n",0))
+                                    elif evt.get("t") == "proc":
+                                        self.proc_signal.emit(evt)
+                                    elif evt.get("t") == "end":
+                                        self.finished_signal.emit(evt)
+                                except: pass
+                        last_size = size
+            except: pass
+            time.sleep(0.15)
+
+        try:
+            if os.path.exists(out_path):
+                with open(out_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line: continue
+                        try:
+                            evt = json.loads(line)
+                            if evt.get("t") == "log": self.log_signal.emit(evt.get("m",""), evt.get("l","info"))
+                            elif evt.get("t") == "res": self.result_signal.emit(evt)
+                            elif evt.get("t") == "end": self.finished_signal.emit(evt)
+                        except: pass
+        except: pass
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("文件粉碎工具")
-        self.setMinimumSize(720, 600)
-        self.resize(780, 680)
-
-        self.targets = []  # 待删除路径列表
-        self.worker_process = None
-        self.worker_out = None
-        self.worker_poll_timer = QTimer(self)
-        self.worker_poll_timer.timeout.connect(self._poll_worker)
-        self.worker_log_pos = 0
-        self.cancel_file = None
-
+        self.setWindowTitle("文件粉碎工具 v2.0")
+        self.setMinimumSize(720, 680)
+        self.setStyleSheet(f"QMainWindow {{ background: {BG}; }}")
+        self.targets = {}
+        self.worker = None
         self._build_ui()
-        self._apply_style()
-
-    def _apply_style(self):
-        self.setStyleSheet(f"""
-            QMainWindow {{ background-color: #F8F8F8; }}
-            QLabel {{ color: {COLOR_TEXT}; }}
-            QListWidget {{
-                background-color: {COLOR_CARD};
-                border: 1px solid {COLOR_BORDER};
-                border-radius: 4px;
-                padding: 4px;
-                font-size: 13px;
-                outline: none;
-            }}
-            QListWidget::item {{
-                padding: 8px 10px;
-                border-radius: 3px;
-                border-bottom: 1px solid #F0F0F0;
-            }}
-            QListWidget::item:hover {{ background-color: {COLOR_HOVER}; }}
-            QListWidget::item:selected {{ background-color: #E3F0FC; color: {COLOR_TEXT}; }}
-            QTextEdit {{
-                background-color: #FAFAFA;
-                border: 1px solid {COLOR_BORDER};
-                border-radius: 4px;
-                padding: 6px;
-                font-family: Consolas, 'Courier New', monospace;
-                font-size: 12px;
-                color: #333;
-            }}
-            QProgressBar {{
-                border: 1px solid {COLOR_BORDER};
-                border-radius: 3px;
-                text-align: center;
-                height: 20px;
-                font-size: 12px;
-                background-color: #F0F0F0;
-            }}
-            QProgressBar::chunk {{
-                background-color: {COLOR_ACCENT};
-                border-radius: 2px;
-            }}
-        """)
 
     def _build_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
-        main_layout.setContentsMargins(16, 16, 16, 16)
-        main_layout.setSpacing(12)
+        main_layout.setContentsMargins(24, 20, 24, 20)
+        main_layout.setSpacing(16)
 
         # 标题
-        title = QLabel("文件粉碎工具")
-        title.setStyleSheet("font-size: 20px; font-weight: 600; color: #1F1F1F;")
-        main_layout.addWidget(title)
+        title_layout = QHBoxLayout()
+        title_label = QLabel("文件粉碎工具")
+        title_label.setStyleSheet(f"color: {TEXT}; font-size: 24px; font-weight: 700;")
+        subtitle = QLabel("智能强制删除 · 多轮重试 · 深度占用分析")
+        subtitle.setStyleSheet(f"color: {TEXT_SECOND}; font-size: 12px;")
+        title_text = QVBoxLayout()
+        title_text.addWidget(title_label)
+        title_text.addWidget(subtitle)
+        title_layout.addLayout(title_text)
+        title_layout.addStretch()
+        self.admin_label = QLabel("⚡ 管理员" if winapi.is_admin() else "🔒 未提权")
+        self.admin_label.setStyleSheet(f"color: {SUCCESS if winapi.is_admin() else WARN}; font-size: 12px; font-weight: 600; padding: 4px 10px; background: {CARD}; border-radius: 12px;")
+        title_layout.addWidget(self.admin_label)
+        main_layout.addLayout(title_layout)
 
-        subtitle = QLabel("L0-L6 递进删除链：清属性 → POSIX删除 → 夺权限 → 关句柄 → NtDeleteFile → 卸载内存映射 → 杀进程 → 重启删")
-        subtitle.setStyleSheet(f"font-size: 11px; color: {COLOR_TEXT_SECONDARY};")
-        subtitle.setWordWrap(True)
-        main_layout.addWidget(subtitle)
+        # 拖拽区
+        self.drop_area = DropArea()
+        self.drop_area.files_dropped.connect(self._add_files)
+        main_layout.addWidget(self.drop_area)
 
-        # === 文件列表卡片 ===
-        list_card = CardFrame()
+        # 文件列表
+        list_card = QFrame()
+        list_card.setStyleSheet(f"background: {CARD}; border: 1px solid {BORDER}; border-radius: 12px;")
         list_layout = QVBoxLayout(list_card)
-        list_layout.setContentsMargins(12, 10, 12, 12)
-        list_layout.setSpacing(8)
-
+        list_layout.setContentsMargins(12, 12, 12, 12)
         list_header = QHBoxLayout()
-        list_label = QLabel("待删除文件/文件夹")
-        list_label.setStyleSheet("font-size: 13px; font-weight: 500;")
-        list_header.addWidget(list_label)
+        self.list_title = QLabel("待删除文件 (0)")
+        self.list_title.setStyleSheet(f"color: {TEXT}; font-size: 14px; font-weight: 600;")
+        self.clear_btn = QPushButton("清空")
+        self.clear_btn.setFixedHeight(28)
+        self.clear_btn.setStyleSheet(f"QPushButton {{ background: transparent; color: {TEXT_SECOND}; border: 1px solid {BORDER}; border-radius: 6px; padding: 0 12px; }} QPushButton:hover {{ background: {BORDER}; color: {TEXT}; }}")
+        self.clear_btn.clicked.connect(self._clear_files)
+        list_header.addWidget(self.list_title)
         list_header.addStretch()
-
-        self.count_label = QLabel("0 项")
-        self.count_label.setStyleSheet(f"font-size: 12px; color: {COLOR_TEXT_SECONDARY};")
-        list_header.addWidget(self.count_label)
+        list_header.addWidget(self.clear_btn)
         list_layout.addLayout(list_header)
 
-        self.list_widget = DropListWidget()
-        self.list_widget.paths_dropped.connect(self._add_paths)
-        self.list_widget.setMinimumHeight(180)
-        list_layout.addWidget(self.list_widget)
-
-        # 列表操作按钮
-        list_btn_row = QHBoxLayout()
-        btn_add_file = FluentButton("添加文件")
-        btn_add_file.clicked.connect(self._add_files)
-        list_btn_row.addWidget(btn_add_file)
-
-        btn_add_folder = FluentButton("添加文件夹")
-        btn_add_folder.clicked.connect(self._add_folder)
-        list_btn_row.addWidget(btn_add_folder)
-
-        btn_paste = FluentButton("粘贴路径")
-        btn_paste.clicked.connect(self._paste_paths)
-        list_btn_row.addWidget(btn_paste)
-
-        list_btn_row.addStretch()
-
-        btn_remove = FluentButton("移除选中")
-        btn_remove.clicked.connect(self._remove_selected)
-        list_btn_row.addWidget(btn_remove)
-
-        btn_clear = FluentButton("清空")
-        btn_clear.clicked.connect(self._clear_list)
-        list_btn_row.addWidget(btn_clear)
-
-        list_layout.addLayout(list_btn_row)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setStyleSheet(f"QScrollArea {{ background: {CARD}; }}")
+        self.list_widget = QWidget()
+        self.list_layout = QVBoxLayout(self.list_widget)
+        self.list_layout.setSpacing(6)
+        self.list_layout.addStretch()
+        self.scroll.setWidget(self.list_widget)
+        self.scroll.setMaximumHeight(200)
+        list_layout.addWidget(self.scroll)
         main_layout.addWidget(list_card)
 
-        # === 选项卡片 ===
-        opt_card = CardFrame()
-        opt_layout = QVBoxLayout(opt_card)
-        opt_layout.setContentsMargins(12, 10, 12, 12)
-        opt_layout.setSpacing(4)
+        # 选项
+        opts_card = QFrame()
+        opts_card.setStyleSheet(f"background: {CARD}; border: 1px solid {BORDER}; border-radius: 12px;")
+        opts_layout = QVBoxLayout(opts_card)
+        opts_layout.setContentsMargins(16, 12, 16, 12)
+        opts_title = QLabel("删除选项")
+        opts_title.setStyleSheet(f"color: {TEXT}; font-size: 14px; font-weight: 600; margin-bottom: 4px;")
+        opts_layout.addWidget(opts_title)
 
-        opt_label = QLabel("删除选项")
-        opt_label.setStyleSheet("font-size: 13px; font-weight: 500; margin-bottom: 4px;")
-        opt_layout.addWidget(opt_label)
-
-        self.cb_unlock = FluentCheckBox("强力解锁（关句柄 + NtDeleteFile + DELETE_ON_CLOSE + 卸载内存映射）")
+        row1 = QHBoxLayout()
+        self.cb_smart = QCheckBox("🧠 智能模式（动态策略+多轮重试）")
+        self.cb_smart.setChecked(True)
+        self.cb_smart.setStyleSheet(f"QCheckBox {{ color: {TEXT}; font-size: 12px; spacing: 6px; }}")
+        self.cb_unlock = QCheckBox("🔓 关闭文件句柄")
         self.cb_unlock.setChecked(True)
-        opt_layout.addWidget(self.cb_unlock)
+        self.cb_unlock.setStyleSheet(f"QCheckBox {{ color: {TEXT}; font-size: 12px; spacing: 6px; }}")
+        row1.addWidget(self.cb_smart)
+        row1.addWidget(self.cb_unlock)
+        opts_layout.addLayout(row1)
 
-        self.cb_kill = FluentCheckBox("结束占用进程（Restart Manager 定位，强制终止进程树，谨慎）")
-        self.cb_kill.setChecked(False)
-        opt_layout.addWidget(self.cb_kill)
-
-        self.cb_owner = FluentCheckBox("接管所有权与权限（解决「拒绝访问」）")
+        row2 = QHBoxLayout()
+        self.cb_owner = QCheckBox("🔑 夺取所有权")
         self.cb_owner.setChecked(True)
-        opt_layout.addWidget(self.cb_owner)
+        self.cb_owner.setStyleSheet(f"QCheckBox {{ color: {TEXT}; font-size: 12px; spacing: 6px; }}")
+        self.cb_kill = QCheckBox("💀 终止占用进程")
+        self.cb_kill.setChecked(False)
+        self.cb_kill.setStyleSheet(f"QCheckBox {{ color: {TEXT}; font-size: 12px; spacing: 6px; }}")
+        row2.addWidget(self.cb_owner)
+        row2.addWidget(self.cb_kill)
+        opts_layout.addLayout(row2)
 
-        self.cb_reboot = FluentCheckBox("重启时删除（最终兜底，系统启动前自动删除）")
+        row3 = QHBoxLayout()
+        self.cb_reboot = QCheckBox("🔄 重启时删除（兜底）")
         self.cb_reboot.setChecked(True)
-        opt_layout.addWidget(self.cb_reboot)
-
-        self.cb_shred = FluentCheckBox("粉碎覆写（多次覆盖文件内容，防止数据恢复，较慢）")
+        self.cb_reboot.setStyleSheet(f"QCheckBox {{ color: {TEXT}; font-size: 12px; spacing: 6px; }}")
+        self.cb_shred = QCheckBox("🔨 粉碎覆写（不可恢复）")
         self.cb_shred.setChecked(False)
-        opt_layout.addWidget(self.cb_shred)
+        self.cb_shred.setStyleSheet(f"QCheckBox {{ color: {TEXT}; font-size: 12px; spacing: 6px; }}")
+        row3.addWidget(self.cb_reboot)
+        row3.addWidget(self.cb_shred)
+        opts_layout.addLayout(row3)
 
-        main_layout.addWidget(opt_card)
+        # 强力模式（单独一行，带警告）
+        self.cb_force = QCheckBox("⚠️ 强力模式（绕过安全护栏，仅在确认目标安全时使用）")
+        self.cb_force.setChecked(False)
+        self.cb_force.setStyleSheet(f"QCheckBox {{ color: {WARN}; font-size: 12px; spacing: 6px; font-weight: 500; }}")
+        opts_layout.addWidget(self.cb_force)
 
-        # === 操作按钮 + 进度 ===
-        action_row = QHBoxLayout()
+        main_layout.addWidget(opts_card)
 
-        self.btn_scan = FluentButton("查看占用进程")
-        self.btn_scan.clicked.connect(self._scan_locks)
-        action_row.addWidget(self.btn_scan)
-
-        action_row.addStretch()
-
-        self.btn_cancel = FluentButton("取消")
-        self.btn_cancel.clicked.connect(self._cancel_task)
-        self.btn_cancel.setVisible(False)
-        action_row.addWidget(self.btn_cancel)
-
-        self.btn_delete = FluentButton("开始删除", primary=True)
-        self.btn_delete.setMinimumWidth(120)
-        self.btn_delete.clicked.connect(self._start_delete)
-        action_row.addWidget(self.btn_delete)
-
-        main_layout.addLayout(action_row)
-
-        self.progress = QProgressBar()
-        self.progress.setVisible(False)
-        main_layout.addWidget(self.progress)
-
-        # === 日志卡片 ===
-        log_card = CardFrame()
+        # 日志
+        log_card = QFrame()
+        log_card.setStyleSheet(f"background: {CARD}; border: 1px solid {BORDER}; border-radius: 12px;")
         log_layout = QVBoxLayout(log_card)
-        log_layout.setContentsMargins(12, 10, 12, 12)
-        log_layout.setSpacing(6)
-
-        log_header = QHBoxLayout()
-        log_label = QLabel("操作日志")
-        log_label.setStyleSheet("font-size: 13px; font-weight: 500;")
-        log_header.addWidget(log_label)
-        log_header.addStretch()
-        log_layout.addLayout(log_header)
-
+        log_layout.setContentsMargins(12, 10, 12, 10)
+        log_title = QLabel("操作日志")
+        log_title.setStyleSheet(f"color: {TEXT}; font-size: 13px; font-weight: 600;")
+        log_layout.addWidget(log_title)
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
-        self.log_text.setMinimumHeight(120)
+        self.log_text.setMaximumHeight(160)
+        self.log_text.setStyleSheet(f"QTextEdit {{ background: #FAFAFA; border: 1px solid {BORDER}; border-radius: 8px; color: {TEXT}; font-family: 'Consolas', 'Microsoft YaHei', monospace; font-size: 11px; }}")
         log_layout.addWidget(self.log_text)
+        main_layout.addWidget(log_card)
 
-        main_layout.addWidget(log_card, 1)
+        # 进度条和按钮
+        self.progress = QProgressBar()
+        self.progress.setVisible(False)
+        self.progress.setStyleSheet(f"QProgressBar {{ background: {BORDER}; border: none; border-radius: 6px; height: 8px; text-align: center; }} QProgressBar::chunk {{ background: {ACCENT}; border-radius: 6px; }}")
+        main_layout.addWidget(self.progress)
 
-        # 管理员权限提示
-        if not winapi.is_admin():
-            self._log("提示：当前为普通权限，删除时会自动请求 UAC 提权", "warn")
-        else:
-            self._log("已以管理员权限运行", "success")
+        btn_layout = QHBoxLayout()
+        self.delete_btn = QPushButton("🗑️  开始粉碎删除")
+        self.delete_btn.setFixedHeight(44)
+        self.delete_btn.setStyleSheet(f"""
+            QPushButton {{ background: {ACCENT}; color: white; border: none; border-radius: 10px; font-size: 15px; font-weight: 600; }}
+            QPushButton:hover {{ background: {ACCENT_HOVER}; }}
+            QPushButton:disabled {{ background: {BORDER}; color: {TEXT_SECOND}; }}
+        """)
+        self.delete_btn.clicked.connect(self._start_delete)
+        self.cancel_btn = QPushButton("取消")
+        self.cancel_btn.setFixedHeight(44)
+        self.cancel_btn.setVisible(False)
+        self.cancel_btn.setStyleSheet(f"""
+            QPushButton {{ background: {CARD}; color: {TEXT}; border: 1px solid {BORDER}; border-radius: 10px; font-size: 14px; }}
+            QPushButton:hover {{ background: {BORDER}; }}
+        """)
+        self.cancel_btn.clicked.connect(self._cancel_delete)
+        btn_layout.addWidget(self.delete_btn, 1)
+        btn_layout.addWidget(self.cancel_btn)
+        main_layout.addLayout(btn_layout)
 
-    # ========== 列表操作 ==========
-
-    def _add_paths(self, paths):
-        added = 0
+    def _add_files(self, paths):
         for p in paths:
-            norm = os.path.normpath(p)
-            if os.path.exists(norm) and norm not in self.targets:
-                self.targets.append(norm)
-                added += 1
-        self._refresh_list()
-        if added:
-            self._log(f"已添加 {added} 个目标", "info")
+            if p not in self.targets:
+                item = FileItem(p)
+                item.removed.connect(self._remove_file)
+                self.targets[p] = item
+                self.list_layout.insertWidget(self.list_layout.count() - 1, item)
+        self._update_list_title()
 
-    def _add_files(self):
-        files, _ = QFileDialog.getOpenFileNames(self, "选择要删除的文件")
-        if files:
-            self._add_paths(files)
+    def _remove_file(self, path):
+        if path in self.targets:
+            item = self.targets.pop(path)
+            item.setParent(None)
+            item.deleteLater()
+        self._update_list_title()
 
-    def _add_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "选择要删除的文件夹")
-        if folder:
-            self._add_paths([folder])
+    def _clear_files(self):
+        for p in list(self.targets.keys()):
+            self._remove_file(p)
 
-    def _paste_paths(self):
-        clipboard = QApplication.clipboard()
-        text = clipboard.text().strip()
-        if not text:
-            return
-        paths = []
-        for line in text.splitlines():
-            line = line.strip().strip('"').strip("'")
-            if line and os.path.exists(line):
-                paths.append(line)
-        if paths:
-            self._add_paths(paths)
-        else:
-            QMessageBox.information(self, "提示", "剪贴板中未找到有效路径")
-
-    def _remove_selected(self):
-        for item in self.list_widget.selectedItems():
-            path = item.data(Qt.UserRole)
-            if path in self.targets:
-                self.targets.remove(path)
-        self._refresh_list()
-
-    def _clear_list(self):
-        self.targets.clear()
-        self._refresh_list()
-
-    def _refresh_list(self):
-        self.list_widget.clear()
-        for path in self.targets:
-            if os.path.isdir(path):
-                # 计算文件夹大小
-                total = 0
-                try:
-                    for root, dirs, files in os.walk(path):
-                        for f in files:
-                            try:
-                                total += os.path.getsize(os.path.join(root, f))
-                            except:
-                                pass
-                except:
-                    pass
-                size_str = self._fmt_size(total)
-                icon = "📁"
-                type_str = "文件夹"
-            elif os.path.isfile(path):
-                size_str = self._fmt_size(os.path.getsize(path))
-                icon = "📄"
-                type_str = "文件"
-            else:
-                size_str = "-"
-                icon = "❓"
-                type_str = "不存在"
-
-            item = QListWidgetItem(f"{icon}  {path}\n     {type_str}  ·  {size_str}")
-            item.setData(Qt.UserRole, path)
-            item.setSizeHint(item.sizeHint().expandedTo(item.sizeHint()))
-            self.list_widget.addItem(item)
-
-        self.count_label.setText(f"{len(self.targets)} 项")
-
-    @staticmethod
-    def _fmt_size(size):
-        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-            if size < 1024:
-                return f"{size:.1f} {unit}"
-            size /= 1024
-        return f"{size:.1f} PB"
-
-    # ========== 日志 ==========
+    def _update_list_title(self):
+        self.list_title.setText(f"待删除文件 ({len(self.targets)})")
 
     def _log(self, msg, level="info"):
-        color = {
-            "info": "#333333",
-            "success": COLOR_SUCCESS,
-            "warn": COLOR_WARN,
-            "error": COLOR_DANGER,
-        }.get(level, "#333333")
-        timestamp = time.strftime("%H:%M:%S")
-        self.log_text.append(f'<span style="color:#999;">[{timestamp}]</span> '
-                           f'<span style="color:{color};">{msg}</span>')
-
-    # ========== 扫描占用 ==========
-
-    def _scan_locks(self):
-        if not self.targets:
-            QMessageBox.information(self, "提示", "请先添加文件或文件夹")
-            return
-        self._log("正在查找占用进程...", "info")
-        self.btn_scan.setEnabled(False)
-        QTimer.singleShot(100, lambda: self._do_scan())
-
-    def _do_scan(self):
-        try:
-            procs = winapi.find_locking_processes(self.targets)
-            if procs:
-                self._log(f"发现 {len(procs)} 个占用进程：", "warn")
-                for pid, name, atype, restartable in procs:
-                    self._log(f"  PID {pid}: {name} [{atype}]", "warn")
-            else:
-                self._log("未发现占用进程", "success")
-        except Exception as e:
-            self._log(f"扫描失败: {e}", "error")
-        finally:
-            self.btn_scan.setEnabled(True)
-
-    # ========== 删除任务 ==========
+        colors = {"success": SUCCESS, "warn": WARN, "error": ERROR, "info": INFO}
+        color = colors.get(level, TEXT)
+        ts = time.strftime("%H:%M:%S")
+        self.log_text.append(f'<span style="color:{TEXT_SECOND}">[{ts}]</span> <span style="color:{color}">{msg}</span>')
+        self.log_text.verticalScrollBar().setValue(self.log_text.verticalScrollBar().maximum())
 
     def _start_delete(self):
         if not self.targets:
-            QMessageBox.information(self, "提示", "请先添加文件或文件夹")
+            QMessageBox.warning(self, "提示", "请先添加要删除的文件或文件夹")
             return
+        if self.cb_force.isChecked():
+            reply = QMessageBox.warning(self, "强力模式确认",
+                "强力模式将绕过安全护栏，可能删除系统关键文件！\n\n请确认你添加的目标都是安全的。\n\n是否继续？",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if reply != QMessageBox.Yes:
+                self.cb_force.setChecked(False)
+                return
 
-        # 确认对话框
-        msg = f"确定要删除以下 {len(self.targets)} 个项目吗？\n\n"
-        for p in self.targets[:8]:
-            msg += f"  • {p}\n"
-        if len(self.targets) > 8:
-            msg += f"  • ...等共 {len(self.targets)} 项\n"
-        msg += "\n此操作不可恢复！"
-
-        reply = QMessageBox.warning(
-            self, "确认删除", msg,
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
-        )
-        if reply != QMessageBox.Yes:
-            return
-
-        # 护栏预检
-        blocked = []
-        for p in self.targets:
-            prot, reason = engine.is_protected(p)
-            if prot:
-                blocked.append((p, reason))
-        if blocked:
-            bmsg = "以下路径受安全护栏保护，无法删除：\n\n"
-            for p, r in blocked:
-                bmsg += f"  • {p}\n    {r}\n"
-            QMessageBox.critical(self, "安全拦截", bmsg)
-            return
-
-        # 构建选项
         options = {
             "unlock_handles": self.cb_unlock.isChecked(),
             "kill_processes": self.cb_kill.isChecked(),
             "take_ownership": self.cb_owner.isChecked(),
             "schedule_reboot": self.cb_reboot.isChecked(),
             "shred": self.cb_shred.isChecked(),
+            "smart_mode": self.cb_smart.isChecked(),
+            "force_mode": self.cb_force.isChecked(),
+            "max_retries": 3,
         }
 
-        # 创建任务文件
-        task_file, out_path = worker.write_task(self.targets, options, "delete")
-        self.worker_out = out_path
-        self.cancel_file = task_file + ".cancel"
+        self.log_text.clear()
+        self._log(f"开始删除 {len(self.targets)} 个目标" + (" [智能模式]" if options["smart_mode"] else "") + (" [强力模式]" if options["force_mode"] else ""), "info")
 
-        # 清空日志文件位置
-        self.worker_log_pos = 0
+        for item in self.targets.values():
+            item.set_status("pending")
 
-        # 启动worker（提权）
-        self._log("启动提权工作进程...", "info")
-        try:
-            if is_frozen():
-                exe = sys.executable
-                cmd = [exe, "--worker", task_file]
-            else:
-                exe = sys.executable
-                cmd = [exe, os.path.join(get_app_dir(), "worker.py"), "--worker", task_file]
+        self.delete_btn.setEnabled(False)
+        self.delete_btn.setText("删除中...")
+        self.cancel_btn.setVisible(True)
+        self.progress.setVisible(True)
+        self.progress.setRange(0, len(self.targets))
+        self.progress.setValue(0)
 
-            if winapi.is_admin():
-                # 已经是管理员，直接启动
-                self.worker_process = subprocess.Popen(
-                    cmd, creationflags=0x08000000,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-                )
-            else:
-                # ShellExecute runas 提权
-                params = f'"--worker" "{task_file}"'
-                if not is_frozen():
-                    params = f'"{os.path.join(get_app_dir(), "worker.py")}" "{task_file}"'
-                rc = ctypes.windll.shell32.ShellExecuteW(
-                    None, "runas", exe, params, None, 0
-                )
-                if rc <= 32:
-                    self._log("用户取消了UAC提权", "warn")
-                    return
-                self.worker_process = None  # 提权进程无法直接跟踪
+        self.worker = DeleteWorker(list(self.targets.keys()), options)
+        self.worker.log_signal.connect(self._log)
+        self.worker.result_signal.connect(self._on_result)
+        self.worker.progress_signal.connect(lambda d, n: self.progress.setValue(d))
+        self.worker.finished_signal.connect(self._on_finished)
+        self.worker.start()
 
-            self._set_running(True)
-            self.worker_poll_timer.start(300)
+    def _on_result(self, evt):
+        path = evt.get("path", "")
+        status = evt.get("status", "failed")
+        message = evt.get("message", "")
+        if path in self.targets:
+            self.targets[path].set_status(status, message)
 
-        except Exception as e:
-            self._log(f"启动失败: {e}", "error")
+    def _on_finished(self, evt):
+        deleted = evt.get("deleted", 0)
+        failed = evt.get("failed", 0)
+        reboot = evt.get("reboot", 0)
+        blocked = evt.get("blocked", 0)
+        cancelled = evt.get("cancelled", False)
 
-    def _cancel_task(self):
-        if self.cancel_file:
-            try:
-                with open(self.cancel_file, "w") as f:
-                    f.write("cancel")
-                self._log("正在取消...", "warn")
-            except:
-                pass
+        self._log(f"=== 完成 ===", "info")
+        self._log(f"✓ 已删除: {deleted}", "success")
+        if reboot: self._log(f"⏳ 重启删除: {reboot}", "warn")
+        if blocked: self._log(f"🚫 已拦截: {blocked}", "error")
+        if failed: self._log(f"✗ 失败: {failed}", "error")
+        if cancelled: self._log("已取消", "warn")
 
-    def _set_running(self, running):
-        self.btn_delete.setVisible(not running)
-        self.btn_cancel.setVisible(running)
-        self.progress.setVisible(running)
-        self.btn_scan.setEnabled(not running)
-        if running:
-            self.progress.setRange(0, len(self.targets))
-            self.progress.setValue(0)
+        self.delete_btn.setEnabled(True)
+        self.delete_btn.setText("🗑️  开始粉碎删除")
+        self.cancel_btn.setVisible(False)
+        self.progress.setVisible(False)
 
-    def _poll_worker(self):
-        """轮询worker输出文件"""
-        if not self.worker_out or not os.path.exists(self.worker_out):
-            return
+        if failed == 0 and not cancelled:
+            QMessageBox.information(self, "完成", f"删除完成！\n\n已删除: {deleted}\n重启删除: {reboot}")
+        elif cancelled:
+            QMessageBox.information(self, "已取消", "操作已取消")
+        else:
+            QMessageBox.warning(self, "部分失败", f"部分文件删除失败\n\n已删除: {deleted}\n失败: {failed}\n重启删除: {reboot}\n\n请查看日志了解详情")
 
-        try:
-            with open(self.worker_out, "r", encoding="utf-8") as f:
-                f.seek(self.worker_log_pos)
-                new_content = f.read()
-                self.worker_log_pos = f.tell()
+    def _cancel_delete(self):
+        if self.worker:
+            self.worker.cancel()
+            self._log("正在取消...", "warn")
 
-            for line in new_content.strip().split("\n"):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    event = json.loads(line)
-                    self._handle_event(event)
-                except:
-                    pass
-        except:
-            pass
 
-    def _handle_event(self, event):
-        t = event.get("t")
-        if t == "log":
-            self._log(event.get("m", ""), event.get("l", "info"))
-        elif t == "prog":
-            d = event.get("d", 0)
-            n = event.get("n", 1)
-            self.progress.setRange(0, n)
-            self.progress.setValue(d)
-        elif t == "res":
-            status = event.get("status", "")
-            path = event.get("path", "")
-            level = event.get("level", -1)
-            if status == "deleted":
-                self._log(f"✓ 已删除 (L{level}): {path}", "success")
-            elif status == "reboot":
-                self._log(f"⏳ 已登记重启删除: {path}", "warn")
-            elif status == "blocked":
-                self._log(f"🚫 已拦截: {path}", "error")
-            else:
-                self._log(f"✗ 删除失败: {path}", "error")
-        elif t == "proc":
-            self._log(f"  占用: PID {event.get('pid')} {event.get('name')}", "warn")
-        elif t == "end":
-            self.worker_poll_timer.stop()
-            self._set_running(False)
-            ok = event.get("ok", False)
-            deleted = event.get("deleted", 0)
-            reboot = event.get("reboot", 0)
-            failed = event.get("failed", 0)
-            blocked = event.get("blocked", 0)
-            cancelled = event.get("cancelled", False)
-
-            if cancelled:
-                self._log("任务已取消", "warn")
-            elif ok:
-                self._log(f"全部完成：删除 {deleted} 个" +
-                         (f"，重启删除 {reboot} 个" if reboot else ""), "success")
-                QMessageBox.information(self, "完成",
-                    f"成功删除 {deleted} 个目标" +
-                    (f"\n{reboot} 个已登记为重启时删除" if reboot else ""))
-            else:
-                self._log(f"完成：删除 {deleted}，重启删除 {reboot}，失败 {failed}，拦截 {blocked}",
-                         "warn" if failed == 0 else "error")
-                QMessageBox.warning(self, "部分失败",
-                    f"删除 {deleted} 个，重启删除 {reboot} 个\n"
-                    f"失败 {failed} 个，拦截 {blocked} 个")
-
-            # 刷新列表（移除已删除的）
-            self.targets = [p for p in self.targets if os.path.exists(p)]
-            self._refresh_list()
-
-            # 清理
-            if self.worker_out and os.path.exists(self.worker_out):
-                try:
-                    os.remove(self.worker_out)
-                except:
-                    pass
-            if self.cancel_file and os.path.exists(self.cancel_file):
-                try:
-                    os.remove(self.cancel_file)
-                except:
-                    pass
+def run_gui():
+    app = QApplication(sys.argv)
+    app.setStyle("Fusion")
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
